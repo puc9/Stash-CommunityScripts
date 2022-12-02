@@ -30,6 +30,15 @@ var rules = [
       performers: '#3'
     }
   },
+  {
+    name: 'Skip Rule 1',
+    pattern: [
+      ['One Studio', 'Another Studio'],
+      patterns.movieTitleAndYear,
+      patterns.sceneTitleAndPerformers
+    ],
+    skip: true,
+  },
 ];
 
 /* ----------------------------------------------------------------------------
@@ -53,6 +62,12 @@ function main()
         removeTags([runTag, testTag]);
         break;
 
+      case 'cleanScenesTags':
+        var runTag = getArg(input.Args, 'runTag');
+        var testTag = getArg(input.Args, 'testTag');
+        cleanScenesTags([runTag, testTag]);
+        break;
+
       case 'runRules':
         var runTag = getArg(input.Args, 'runTag');
         initBasePaths();
@@ -69,7 +84,7 @@ function main()
       case 'scene':
         var id = getId(input.Args);
         initBasePaths();
-        matchRuleWithSceneId(id, applyRule);
+        matchRuleWithSceneId(id, applyRule, true);
         break;
 
       case 'image':
@@ -107,7 +122,7 @@ function getTask(inputArgs)
   {
     return inputArgs.task;
   }
-  
+
   if (!inputArgs.hasOwnProperty('hookContext'))
   {
     return;
@@ -117,7 +132,7 @@ function getTask(inputArgs)
   {
     case 'Scene.Create.Post':
       return 'scene';
-    
+
     case 'Image.Create.Post':
       return 'image';
   }
@@ -126,7 +141,7 @@ function getTask(inputArgs)
 // Get stash paths from configuration
 function initBasePaths()
 {
-  var query ='\
+  var query = '\
   query Query {\
     configuration {\
       general {\
@@ -157,7 +172,7 @@ function initBasePaths()
 // Create tag if it does not already exist
 function createTags(tags)
 {
-  var query ='\
+  var query = '\
   mutation TagCreate($input: TagCreateInput!) {\
     tagCreate(input: $input) {\
       id\
@@ -202,7 +217,7 @@ function removeTags(tags)
     }';
 
     var variables = {
-      ids: [ tagId ]
+      ids: [tagId]
     };
 
     var result = gql.Do(query, variables);
@@ -211,6 +226,97 @@ function removeTags(tags)
       throw 'Unable to remove tag ' + tag;
     }
   });
+}
+
+// Remove tags from scenes
+function cleanScenesTags(tags)
+{
+  var tagIds = tags.map(tryGetTag).filter(notNull);
+
+  if (!tagIds || tagIds.count == 0)
+  {
+    log.Info("No tags found.");
+    return;
+  }
+
+  var taggedScenesQuery = '\
+  query FindTaggedScenes($taggedSceneFilter: SceneFilterType, $filterType: FindFilterType) {\
+    findScenes(scene_filter: $taggedSceneFilter, filter: $filterType) {\
+      count\
+      scenes {\
+        id\
+      }\
+    }\
+  }';
+
+  var cleanTagsQuery = '\
+  mutation cleanTagsQuery($removeTags: BulkSceneUpdateInput!) {\
+    bulkSceneUpdate(input: $removeTags) {\
+      id\
+    }\
+  }\
+  ';
+
+  var currentPage = 1;
+  var processedSceneCount = 0;
+  var totalSceneFound = 0;
+  var progress = 0;
+
+  while (true)
+  {
+    var taggedScenesVariables = {
+      taggedSceneFilter: {
+        tags: {
+          modifier: 'INCLUDES',
+          value: tagIds
+        }
+      },
+      filterType: {
+        page: currentPage,
+        per_page: 20
+      }
+    };
+
+    log.Debug(taggedScenesQuery);
+    log.Debug(taggedScenesVariables);
+    var taggedScenes = gql.Do(taggedScenesQuery, taggedScenesVariables);
+    log.Debug(taggedScenes);
+    if (!taggedScenes.findScenes || (taggedScenes.findScenes.scenes.length == 0 && currentPage == 1))
+    {
+      log.Info("No scenes tagged with: ['" + tags.join("', '") + "']");
+    }
+    var returnedCount = taggedScenes.findScenes.scenes.length;
+    if (returnedCount == 0)
+    {
+      return;
+    }
+    processedSceneCount += returnedCount;
+    if (!totalSceneFound)
+    {
+      totalSceneFound = taggedScenes.findScenes.count;
+    }
+
+    var sceneIds = taggedScenes.findScenes.scenes.map(function (s) { return s.id; });
+
+    log.Debug(sceneIds);
+
+    var cleanTagsVariables = {
+      removeTags: {
+        ids: sceneIds,
+        tag_ids: {
+          ids: tagIds,
+          mode: "REMOVE",
+        }
+      }
+    };
+
+    log.Debug(taggedScenesQuery);
+    log.Debug(cleanTagsVariables);
+    var cleanedScenes = gql.Do(cleanTagsQuery, cleanTagsVariables);
+    log.Debug(cleanedScenes);
+    progress += cleanedScenes.bulkSceneUpdate.length
+    log.Progress(progress / totalSceneFound);
+  }
 }
 
 // Run rules for scenes containing tag
@@ -222,34 +328,69 @@ function runRules(tag)
     throw 'Tag ' + tag + ' does not exist';
   }
 
+  log.Info('[PathParser] Start processing scenes marked with tag: ' + tag);
+
   var query = '\
-  query FindScenes($sceneFilter: SceneFilterType) {\
-    findScenes(scene_filter: $sceneFilter) {\
+  query FindScenes($sceneFilter: SceneFilterType, $filterType: FindFilterType) {\
+    findScenes(scene_filter: $sceneFilter, filter: $filterType) {\
+      count\
       scenes {\
         id\
       }\
     }\
   }';
 
-  var variables = {
-    sceneFilter: {
-      tags: {
-        value: tagId,
-        modifier: 'INCLUDES'
-      }
-    }
-  };
+  var currentPage = 1;
+  var processedSceneCount = 0;
+  var totalSceneFound = 0;
+  var progress = 0;
 
-  var result = gql.Do(query, variables);
-  if (!result.findScenes || result.findScenes.scenes.length == 0)
+  do
   {
-    throw 'No scenes found with tag ' + tag;
+    var variables = {
+      sceneFilter: {
+        tags: {
+          value: tagId,
+          modifier: 'INCLUDES'
+        }
+      },
+      filterType: {
+        page: currentPage,
+        per_page: 20
+      }
+    };
+
+    var result = gql.Do(query, variables);
+    if (!result.findScenes || (result.findScenes.scenes.length == 0 && currentPage == 1))
+    {
+      throw 'No scenes found with tag ' + tag;
+    }
+
+    var returnedCount = result.findScenes.scenes.length;
+    processedSceneCount += returnedCount;
+    totalSceneFound = result.findScenes.count;
+
+    log.Debug('Processing ' + returnedCount + ' scenes')
+    result.findScenes.scenes.forEach(function (scene)
+    {
+      matchRuleWithSceneId(scene.id, applyRule, false);
+
+      progress++;
+
+      log.Progress(progress / totalSceneFound);
+    });
+
+    currentPage++;
+
+  } while (returnedCount > 0);
+
+
+  if (processedSceneCount > 0)
+  {
+    log.Info('[PathParser] Processed: ' + processedSceneCount + ' scenes out of ' + totalSceneFound + ' found.');
   }
 
-  result.findScenes.scenes.forEach(function (scene)
-  {
-    matchRuleWithSceneId(scene.id, applyRule);
-  });
+  log.Info('[PathParser] Done processing scenes marked with tag: ' + tag);
 }
 
 // Get scene/image id from input args
@@ -264,7 +405,7 @@ function getId(inputArgs)
 }
 
 // Apply callback function to first matching rule for id
-function matchRuleWithSceneId(sceneId, cb)
+function matchRuleWithSceneId(sceneId, cb, onHookCall)
 {
   var query = '\
   query FindScene($findSceneId: ID) {\
@@ -285,12 +426,18 @@ function matchRuleWithSceneId(sceneId, cb)
     throw 'Missing scene for id: ' + sceneId;
   }
 
+  var firstPathFound = null;
   for (var i = 0; i < result.findScene.files.length; i++)
   {
+    if (!firstPathFound)
+    {
+      firstPathFound = result.findScene.files[i].path;
+    }
+
     try
     {
       matchRuleWithPath(sceneId, result.findScene.files[i].path, cb);
-      
+
       if (DEBUG && bufferedOutput !== null && bufferedOutput !== '')
       {
         log.Info('[PathParser] ' + bufferedOutput);
@@ -303,13 +450,27 @@ function matchRuleWithSceneId(sceneId, cb)
       continue;
     }
   }
-  
+
   if (DEBUG && bufferedOutput !== null && bufferedOutput !== '')
   {
     log.Info('[PathParser] ' + bufferedOutput);
   }
 
-  throw 'No rule matches id: ' + sceneId;
+  var msg = '[PathParser] No rule matches id: ' + sceneId;
+
+  if (firstPathFound !== null)
+  {
+    msg += '\nPath: ' + firstPathFound;
+  }
+
+  if (onHookCall)
+  {
+    log.Debug(msg);
+  }
+  else
+  {
+    log.Warn(msg);
+  }
 }
 
 // Apply callback to first matching rule for path
@@ -345,8 +506,24 @@ function matchRuleWithPath(sceneId, path, cb)
         bufferedOutput += 'Rule: ' + rules[i].name + '\n';
       }
 
-      log.Debug('[PathParser] Rule: ' + rules[i].name + '\nPath: ' + path);
-      cb(sceneId, rules[i].fields, sceneData);
+      if (rules[i].skip === true)
+      {
+        if (DEBUG)
+        {
+          bufferedOutput += 'Skipping scene: ' + sceneId + '\n';
+        }
+        else
+        {
+          log.Info('[PathParser] Rule: ' + rules[i].name +
+            '\nPath: ' + path +
+            '\nSkipping scene: ' + sceneId);
+        }
+
+        return;
+      }
+
+      cb(sceneId, path, rules[i], sceneData);
+
       return;
     }
   }
@@ -443,7 +620,7 @@ function testPattern(pattern, part)
 }
 
 // Apply rule
-function applyRule(sceneId, fields, data)
+function applyRule(sceneId, scenePath, rule, data)
 {
   var any = false;
   var variables = {
@@ -459,6 +636,8 @@ function applyRule(sceneId, fields, data)
       bufferedOutput += '#' + i + ': ' + data[i] + '\n';
     }
   }
+
+  var fields = rule.fields;
 
   for (var field in fields)
   {
@@ -497,29 +676,29 @@ function applyRule(sceneId, fields, data)
         any = true;
         continue;
 
-        case 'movie_title':
-          var movie_title = value.split(' ').join('[\\W]*');
-          var movieId = tryGetMovie(movie_title);
-          if (movieId == null)
-          {
-            continue;
-          }
-
-          if (!variables.input.hasOwnProperty('movies'))
-          {
-            variables.input['movies'] = [{}];
-          }
-
-          if (DEBUG)
-          {
-            bufferedOutput += field + ': ' + value + '\n';
-            bufferedOutput += 'movie_id: ' + movieId + '\n';
-          }
-
-          variables.input['movies'][0]['movie_id'] = movieId;
-          any = true;
+      case 'movie_title':
+        var movie_title = value.split(' ').join('[\\W]*');
+        var movieId = tryGetMovie(movie_title);
+        if (movieId == null)
+        {
           continue;
-      
+        }
+
+        if (!variables.input.hasOwnProperty('movies'))
+        {
+          variables.input['movies'] = [{}];
+        }
+
+        if (DEBUG)
+        {
+          bufferedOutput += field + ': ' + value + '\n';
+          bufferedOutput += 'movie_id: ' + movieId + '\n';
+        }
+
+        variables.input['movies'][0]['movie_id'] = movieId;
+        any = true;
+        continue;
+
       case 'scene_index':
         var sceneIndex = parseInt(value);
         if (isNaN(sceneIndex))
@@ -573,6 +752,13 @@ function applyRule(sceneId, fields, data)
         variables.input['tag_ids'] = tags;
         any = true;
         continue;
+      default:
+        if (DEBUG)
+        {
+          bufferedOutput += field + ': ' + value + '\n';
+        }
+        variables.input[field] = value;
+        any = true;
     }
   }
 
@@ -607,7 +793,13 @@ function applyRule(sceneId, fields, data)
   }
 
   var result = gql.Do(query, variables);
-  if (!result.sceneUpdate)
+  if (result.sceneUpdate)
+  {
+    log.Info('[PathParser] Rule: ' + rule.name +
+      '\nPath: ' + scenePath +
+      '\nUpdated scene: ' + sceneId);
+  }
+  else
   {
     throw 'Unable to update scene ' + sceneId;
   }
@@ -680,6 +872,44 @@ function tryGetMovie(movie_title)
   return result.findMovies.movies[0].id;
 }
 
+function createPerformer(performer)
+{
+  performer = performer.trim();
+  if (!performer)
+  {
+    return null;
+  }
+
+  if (DEBUG)
+  {
+    bufferedOutput += 'performers: ' + performer + ' would be created' + '\n';
+    return null;
+  }
+
+  log.Info('[PathParser] createPerformer(' + performer + ')');
+  var query = '\
+  mutation PerformerCreate($input: PerformerCreateInput!) {\
+    performerCreate(input: $input) {\
+      id\
+    }\
+  }';
+
+  var variables = {
+    input: {
+      name: performer
+    }
+  };
+
+  var result = gql.Do(query, variables);
+  if (!result.performerCreate)
+  {
+    throw 'Could not create performer ' + performer;
+  }
+
+  return result.performerCreate.id;
+}
+
+
 // Get performer id from performer name
 function tryGetPerformer(performer)
 {
@@ -693,19 +923,36 @@ function tryGetPerformer(performer)
     }\
   }';
 
+  performer = performer.trim();
+  if (!performer)
+  {
+    return null;
+  }
+
   var variables = {
     performerFilter: {
       name: {
-        value: performer.trim(),
-        modifier: 'EQUALS'
+        modifier: 'EQUALS',
+        value: performer
+      },
+      OR: {
+        aliases: {
+          modifier: 'INCLUDES',
+          value: performer
+        }
       }
     }
   };
 
   var result = gql.Do(query, variables);
-  if (!result.findPerformers || result.findPerformers.count == 0)
+  if (!result.findPerformers)
   {
-    return;
+    return null;
+  }
+
+  if (result.findPerformers.count == 0)
+  {
+    return createPerformer(performer);
   }
 
   return result.findPerformers.performers[0].id;
@@ -714,7 +961,7 @@ function tryGetPerformer(performer)
 // Get tag id from tag name
 function tryGetTag(tag)
 {
-  var query ='\
+  var query = '\
   query FindTags($tagFilter: TagFilterType) {\
     findTags(tag_filter: $tagFilter) {\
       tags {\
@@ -736,7 +983,7 @@ function tryGetTag(tag)
   var result = gql.Do(query, variables);
   if (!result.findTags || result.findTags.count == 0)
   {
-    return;
+    return null;
   }
 
   return result.findTags.tags[0].id;
