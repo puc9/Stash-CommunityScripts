@@ -31,6 +31,15 @@ var rules = [
     }
   },
   {
+    name: 'Scrape Rule 1',
+    pattern: [
+      ['One Studio', 'Another Studio'],
+      patterns.movieTitleAndYear,
+      patterns.sceneTitleAndPerformers
+    ],
+    scrapeWith: 'scrapper-id',
+  },
+  {
     name: 'Skip Rule 1',
     pattern: [
       ['One Studio', 'Another Studio'],
@@ -183,6 +192,7 @@ function createTags(tags)
   {
     if (tryGetTag(tag) !== null)
     {
+      log.Info('[PathParser] Tag "' + tag + '" is already present.');
       return;
     }
 
@@ -193,7 +203,11 @@ function createTags(tags)
     };
 
     var result = gql.Do(query, variables);
-    if (!result.tagCreate)
+    if (result.tagCreate)
+    {
+      log.Info('[PathParser] Created tag ' + tag + ' with ID: ' + result.tagCreate["id"]);
+    }
+    else
     {
       throw 'Could not create tag ' + tag;
     }
@@ -221,7 +235,11 @@ function removeTags(tags)
     };
 
     var result = gql.Do(query, variables);
-    if (!result.tagsDestroy)
+    if (result.tagsDestroy)
+    {
+      log.Info('[PathParser] Removed tag ' + tag + ' with ID: ' + tagId);
+    }
+    else
     {
       throw 'Unable to remove tag ' + tag;
     }
@@ -235,7 +253,7 @@ function cleanScenesTags(tags)
 
   if (!tagIds || tagIds.count == 0)
   {
-    log.Info("No tags found.");
+    log.Info("[PathParser] No tags found.");
     return;
   }
 
@@ -257,10 +275,10 @@ function cleanScenesTags(tags)
   }\
   ';
 
-  var currentPage = 1;
-  var processedSceneCount = 0;
   var totalSceneFound = 0;
-  var progress = 0;
+  var cleanedScenesCount = 0;
+  var firstRun = true;
+  var prettyTagsToRemove = "['" + tags.join("', '") + "']"
 
   while (true)
   {
@@ -270,10 +288,6 @@ function cleanScenesTags(tags)
           modifier: 'INCLUDES',
           value: tagIds
         }
-      },
-      filterType: {
-        page: currentPage,
-        per_page: 20
       }
     };
 
@@ -281,19 +295,21 @@ function cleanScenesTags(tags)
     log.Debug(taggedScenesVariables);
     var taggedScenes = gql.Do(taggedScenesQuery, taggedScenesVariables);
     log.Debug(taggedScenes);
-    if (!taggedScenes.findScenes || (taggedScenes.findScenes.scenes.length == 0 && currentPage == 1))
+    if (!taggedScenes.findScenes || (taggedScenes.findScenes.scenes.length == 0 && firstRun))
     {
-      log.Info("No scenes tagged with: ['" + tags.join("', '") + "']");
+      log.Info("[PathParser] No scenes tagged with: " + prettyTagsToRemove);
     }
+
+    if (firstRun)
+    {
+      totalSceneFound = taggedScenes.findScenes.count;
+      firstRun = false;
+    }
+
     var returnedCount = taggedScenes.findScenes.scenes.length;
     if (returnedCount == 0)
     {
-      return;
-    }
-    processedSceneCount += returnedCount;
-    if (!totalSceneFound)
-    {
-      totalSceneFound = taggedScenes.findScenes.count;
+      break;
     }
 
     var sceneIds = taggedScenes.findScenes.scenes.map(function (s) { return s.id; });
@@ -314,8 +330,14 @@ function cleanScenesTags(tags)
     log.Debug(cleanTagsVariables);
     var cleanedScenes = gql.Do(cleanTagsQuery, cleanTagsVariables);
     log.Debug(cleanedScenes);
-    progress += cleanedScenes.bulkSceneUpdate.length
-    log.Progress(progress / totalSceneFound);
+    cleanedScenesCount += cleanedScenes.bulkSceneUpdate.length
+    log.Progress(cleanedScenesCount / totalSceneFound);
+  }
+
+  if (totalSceneFound > 0)
+  {
+    log.Info('[PathParser] Removed tags ' + prettyTagsToRemove +
+      ' from ' + cleanedScenesCount + ' scenes out of ' + totalSceneFound + ' found.');
   }
 }
 
@@ -344,6 +366,7 @@ function runRules(tag)
   var processedSceneCount = 0;
   var totalSceneFound = 0;
   var progress = 0;
+  var firstRun = true;
 
   do
   {
@@ -361,14 +384,23 @@ function runRules(tag)
     };
 
     var result = gql.Do(query, variables);
-    if (!result.findScenes || (result.findScenes.scenes.length == 0 && currentPage == 1))
+    if (!result.findScenes || (result.findScenes.scenes.length == 0 && firstRun))
     {
       throw 'No scenes found with tag ' + tag;
     }
 
+    if (firstRun)
+    {
+      totalSceneFound = result.findScenes.count;
+      firstRun = false;
+    }
+
     var returnedCount = result.findScenes.scenes.length;
-    processedSceneCount += returnedCount;
-    totalSceneFound = result.findScenes.count;
+
+    if (!returnedCount)
+    {
+      break;
+    }
 
     log.Debug('Processing ' + returnedCount + ' scenes')
     result.findScenes.scenes.forEach(function (scene)
@@ -380,6 +412,7 @@ function runRules(tag)
       log.Progress(progress / totalSceneFound);
     });
 
+    processedSceneCount += returnedCount;
     currentPage++;
 
   } while (returnedCount > 0);
@@ -447,6 +480,7 @@ function matchRuleWithSceneId(sceneId, cb, onHookCall)
     }
     catch (e)
     {
+      log.Debug(e);
       continue;
     }
   }
@@ -474,62 +508,55 @@ function matchRuleWithSceneId(sceneId, cb, onHookCall)
 }
 
 // Apply callback to first matching rule for path
-function matchRuleWithPath(sceneId, path, cb)
+function matchRuleWithPath(sceneId, scenePath, cb)
 {
+  // Remove extension from filename
+  fullPathNoExt = scenePath.slice(0, scenePath.lastIndexOf('.'));
+
   // Remove base path
+  var libraryPath = fullPathNoExt;
   for (var i = 0; i < BASE_PATHS.length; i++)
   {
-    if (path.slice(0, BASE_PATHS[i].length) === BASE_PATHS[i])
+    if (libraryPath.slice(0, BASE_PATHS[i].length) === BASE_PATHS[i])
     {
-      path = path.slice(BASE_PATHS[i].length);
+      libraryPath = libraryPath.slice(BASE_PATHS[i].length);
+      while (libraryPath[0] === '\\')
+      {
+        libraryPath = libraryPath.slice(1);
+      }
     }
   }
 
   if (DEBUG)
   {
-    bufferedOutput = path + '\n';
+    bufferedOutput = libraryPath + '\n';
   }
 
-  // Split paths into parts
-  var parts = path.split(/[\\/]/);
-
-  // Remove extension from filename
-  parts[parts.length - 1] = parts[parts.length - 1].slice(0, parts[parts.length - 1].lastIndexOf('.'));
+  // Split the paths into parts
+  var allParts = fullPathNoExt.split(/[\\/]/);
+  var partsInLib = libraryPath.split(/[\\/]/);
 
   for (var i = 0; i < rules.length; i++)
   {
-    var sceneData = testRule(rules[i].pattern, parts);
+    var currentRule = rules[i];
+    var partsToTest = currentRule.includesBasePath ? allParts : partsInLib;
+    var sceneData = testRule(currentRule.pattern, partsToTest);
     if (sceneData !== null)
     {
       if (DEBUG)
       {
-        bufferedOutput += 'Rule: ' + rules[i].name + '\n';
+        bufferedOutput += 'Matched rule: ' + currentRule.name + '\n';
       }
 
-      if (rules[i].skip === true)
-      {
-        if (DEBUG)
-        {
-          bufferedOutput += 'Skipping scene: ' + sceneId + '\n';
-        }
-        else
-        {
-          log.Info('[PathParser] Rule: ' + rules[i].name +
-            '\nPath: ' + path +
-            '\nSkipping scene: ' + sceneId);
-        }
-
-        return;
-      }
-
-      cb(sceneId, path, rules[i], sceneData);
+      log.Debug('[PathParser]\nMatched rule: ' + currentRule.name + '\nFor path: ' + scenePath);
+      cb(sceneId, scenePath, currentRule, sceneData);
 
       return;
     }
   }
 
   bufferedOutput += 'No matching rule!';
-  throw 'No matching rule for path: ' + path;
+  throw 'No matching rule for path: ' + scenePath;
 }
 
 // Test single rule
@@ -622,6 +649,132 @@ function testPattern(pattern, part)
 // Apply rule
 function applyRule(sceneId, scenePath, rule, data)
 {
+  if (rule.skip === true)
+  {
+    if (DEBUG)
+    {
+      bufferedOutput += 'Skipping scene: ' + sceneId + '\n';
+    }
+    else
+    {
+      log.Info('[PathParser] Rule: ' + rule.name +
+        '\nPath: ' + scenePath +
+        '\nSkipping scene: ' + sceneId);
+    }
+
+    return;
+  }
+
+  if (rule.scrapeWith)
+  {
+    callScrapper(sceneId, scenePath, rule, data);
+    return;
+  }
+
+  setFields(sceneId, scenePath, rule, data);
+}
+
+function callScrapper(sceneId, scenePath, rule, data)
+{
+  var query = '\
+  mutation RunScrapper($input: IdentifyMetadataInput!) {\
+    metadataIdentify(input: $input)\
+  }';
+
+  var variables = {
+    input: {
+      sources: [{ source: { scraper_id: rule.scrapeWith } }],
+      options: {
+        fieldOptions: [
+          {
+            field: "title",
+            strategy: "OVERWRITE",
+            createMissing: null
+          },
+          {
+            field: "performers",
+            strategy: "MERGE",
+            createMissing: true
+          },
+          {
+            field: "studio",
+            strategy: "OVERWRITE",
+            createMissing: true
+          },
+          {
+            field: "tags",
+            strategy: "MERGE",
+            createMissing: true
+          },
+          {
+            field: "stash_ids",
+            strategy: "IGNORE",
+            createMissing: false
+          },
+          {
+            field: "date",
+            strategy: "OVERWRITE",
+            createMissing: false
+          },
+          {
+            field: "details",
+            strategy: "OVERWRITE",
+            createMissing: false
+          },
+          {
+            field: "url",
+            strategy: "OVERWRITE",
+            createMissing: false
+          },
+          {
+            field: "code",
+            strategy: "OVERWRITE",
+            createMissing: false
+          },
+          {
+            field: "director",
+            strategy: "OVERWRITE",
+            createMissing: false
+          }
+        ],
+        setCoverImage: true,
+        setOrganized: false,
+        includeMalePerformers: true
+      },
+      sceneIDs: [
+        sceneId
+      ]
+    }
+  };
+
+  // Test only
+  if (DEBUG)
+  {
+    bufferedOutput += 'Would call scrapper ' + rule.scrapeWith +
+      ' on scene ' + scenePath +
+      ' ID ' + sceneId +
+      '\n';
+
+    return;
+  }
+
+  var result = gql.Do(query, variables);
+  if (result.metadataIdentify)
+  {
+    log.Info('[PathParser] Rule: ' + rule.name +
+      '\nPath: ' + scenePath +
+      '\nCalled scrapper ' + rule.scrapeWith + ' on scene: ' + sceneId);
+
+  }
+  else
+  {
+    throw 'Unable to run scrapper ' + rule.scrapeWith + ' for scene ' + sceneId;
+  }
+}
+
+// Set the fields
+function setFields(sceneId, scenePath, rule, data)
+{
   var any = false;
   var variables = {
     input: {
@@ -660,7 +813,7 @@ function applyRule(sceneId, scenePath, rule, data)
         continue;
 
       case 'studio':
-        var studioId = tryGetStudio(value);
+        var studioId = getOrCreateStudio(value);
         if (studioId == null)
         {
           continue;
@@ -737,7 +890,7 @@ function applyRule(sceneId, scenePath, rule, data)
         continue;
 
       case 'tags':
-        var tags = value.split(',').map(tryGetTag).filter(notNull);
+        var tags = value.split(',').map(getOrCreateTag).filter(notNull);
         if (tags.length == 0)
         {
           continue;
@@ -840,6 +993,56 @@ function tryGetStudio(studio)
   }
 
   return result.findStudios.studios[0].id;
+}
+
+function createStudio(studio)
+{
+  studio = studio.trim();
+  if (!studio)
+  {
+    return null;
+  }
+
+  if (DEBUG)
+  {
+    bufferedOutput += 'studio: ' + studio + ' would be created' + '\n';
+    return null;
+  }
+
+  log.Info('[PathParser] createStudio(' + studio + ')');
+  var query = '\
+  mutation StudioCreate($input: StudioCreateInput!) {\
+    studioCreate(input: $input) {\
+      id\
+    }\
+  }';
+
+  var variables = {
+    input: {
+      name: studio
+    }
+  };
+
+  var result = gql.Do(query, variables);
+  if (!result.studioCreate)
+  {
+    throw 'Could not create studio ' + studio;
+  }
+
+  return result.studioCreate.id;
+}
+
+// Get studio id from studio name and create it if it doesn't exist
+function getOrCreateStudio(studio)
+{
+  var studioId = tryGetStudio(studio);
+
+  if (studioId)
+  {
+    return studioId;
+  }
+
+  return createStudio(studio);
 }
 
 function tryGetMovie(movie_title)
@@ -987,6 +1190,19 @@ function tryGetTag(tag)
   }
 
   return result.findTags.tags[0].id;
+}
+
+// Get tag id from tag name and create it if it doesn't exist
+function getOrCreateTag(tag)
+{
+  var tagId = tryGetTag(tag);
+
+  if (tagId)
+  {
+    return tagId;
+  }
+
+  return createTags([tag]);
 }
 
 var DEBUG = false;
