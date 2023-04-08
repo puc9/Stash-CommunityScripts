@@ -311,7 +311,10 @@ def process_duplicates(duplicate_list):
         }
     }) > 0)
     total = len(duplicate_list)
-    log.info(f"There is {total} sets of duplicates found.")
+    log.info(f"There are {total} sets of duplicates found.")
+    taggedGroups = 0
+    if filterByCheckTag:
+        log.info(f'There are scenes with {DUPE_TAGS.Check} tag set. We will ignore all the other scenes.')
     for i, group in enumerate(duplicate_list):
         log.progress(i/total)
         filtered_group = []
@@ -329,8 +332,12 @@ def process_duplicates(duplicate_list):
             else:
                 filtered_group.append(scene)
         if len(filtered_group) > 1:
+            taggedGroups += 1
             tag_scenes(filtered_group)
-
+    if taggedGroups:
+        log.info(f'{taggedGroups} sets of duplicates tagged.')
+    else:
+        log.info('No scenes were tagged')
 
 def tag_scenes(group):
     tag_keep = stashApp.find_tag(DUPE_TAGS.Keep, create=True).get("id")
