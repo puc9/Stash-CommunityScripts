@@ -1,0 +1,40 @@
+priority:
+  property:
+    - extension: list
+    - resolution: max
+    - mod_time: min
+    - path: list
+    - bit_rate: max
+    - size: max
+    # - codec: list
+
+  codec:
+    - AV1
+    - H265
+    - HEVC
+    - H264
+    - VP9
+    - MPEG4
+
+  extension:
+    - mp4
+    - webm
+    - ts
+    - mkv
+    - flv
+
+  path:
+
+filters:
+  path:
+
+exclude:
+  path:
+
+tags:
+  Prefix: Dupe
+  Parent: '[Library management]'
+  Keep:   '[Dupe: Keep]'
+  Remove: '[Dupe: Remove]'
+  Ignore: '[Dupe: Ignore]'
+  Check:  '[Dupe: To check]'
